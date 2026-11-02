@@ -6,14 +6,15 @@ import StrandDesign
 //
 // A big tap target that adds one push-up to TODAY per tap, a deliberate Undo for a mistaken tap, the
 // headline figures (today / this week / total / streak), and a contribution-style history graph: one
-// column per week, one row per weekday, shaded by that day's count. All data lives in the local-only
-// `PushupLogStore` (UserDefaults JSON, per calendar day in the local time zone).
+// column per week, one row per weekday, shaded by that day's count. Tapping a past square shows −/+ to
+// correct that day. All data lives in the local-only `PushupLogStore` (UserDefaults JSON, one entry per
+// logical day — rolling at 04:00 like Today, so a late-night set counts toward the evening before).
 struct PushupTrackerView: View {
     @ObservedObject private var store = PushupLogStore.shared
     @Environment(\.scenePhase) private var scenePhase
 
     /// The instant "today" resolves against. Refreshed on appear, on each tap, when the app returns to
-    /// the foreground and at the calendar-day rollover, so a screen left open past midnight moves on.
+    /// the foreground and by a minute tick, so a screen left open past the 04:00 rollover moves on.
     @State private var now = Date()
     /// The history square the user tapped, by day key; nil shows the hint line.
     @State private var selectedKey: String?
@@ -22,7 +23,16 @@ struct PushupTrackerView: View {
     private static let weeksShown = 53
 
     private var calendar: Calendar { store.calendar }
-    private var todayCount: Int { store.counts[PushupDay.key(for: now, calendar: calendar)] ?? 0 }
+    private var todayKey: String { PushupDay.key(for: PushupDay.today(at: now, calendar: calendar), calendar: calendar) }
+    private var todayCount: Int { store.counts[todayKey] ?? 0 }
+
+    /// Only the logical day changing matters, so the tick doesn't re-render the screen every minute.
+    private func refreshNow() {
+        let fresh = Date()
+        if PushupDay.key(for: PushupDay.today(at: fresh, calendar: calendar), calendar: calendar) != todayKey {
+            now = fresh
+        }
+    }
 
     var body: some View {
         ScreenScaffold(title: "Push-ups",
@@ -36,11 +46,10 @@ struct PushupTrackerView: View {
         }
         .onAppear { now = Date() }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { now = Date() }
+            if phase == .active { refreshNow() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
-                    .receive(on: RunLoop.main)) { _ in
-            now = Date()
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+            refreshNow()
         }
     }
 
@@ -85,14 +94,14 @@ struct PushupTrackerView: View {
     }
 
     private func addOne() {
-        now = Date()
-        withAnimation(.easeOut(duration: 0.18)) { _ = store.increment(on: now) }
+        refreshNow()
+        withAnimation(.easeOut(duration: 0.18)) { _ = store.increment() }
         StrandHaptic.light.play()
     }
 
     private func removeOne() {
-        now = Date()
-        withAnimation(.easeOut(duration: 0.18)) { _ = store.decrement(on: now) }
+        refreshNow()
+        withAnimation(.easeOut(duration: 0.18)) { _ = store.decrement() }
         StrandHaptic.selection.play()
     }
 
@@ -171,18 +180,45 @@ struct PushupTrackerView: View {
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer(minLength: 8)
-                Text(store.counts[key] ?? 0, format: .number)
+                let count = store.counts[key] ?? 0
+                dayStepButton("minus", label: "Remove one push-up", enabled: count > 0) {
+                    _ = store.decrement(on: date)
+                }
+                Text(count, format: .number)
                     .font(StrandFont.bodyNumber)
                     .foregroundStyle(StrandPalette.textPrimary)
+                    .contentTransition(.numericText(value: Double(count)))
                 Text("Push-ups")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
+                dayStepButton("plus", label: "Add one push-up", enabled: key <= todayKey) {
+                    _ = store.increment(on: date)
+                }
             }
         } else {
             Text("Tap a square to see that day.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
         }
+    }
+
+    /// A small −/+ that corrects the selected day's total, e.g. to move a set logged on the wrong day.
+    private func dayStepButton(_ symbol: String, label: LocalizedStringKey, enabled: Bool,
+                               action: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) { action() }
+            StrandHaptic.selection.play()
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(enabled ? StrandPalette.accent : StrandPalette.textTertiary)
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(StrandPalette.accent.opacity(enabled ? 0.16 : 0.06)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(Text(label))
     }
 }
 

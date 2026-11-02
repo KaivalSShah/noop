@@ -51,6 +51,47 @@ final class PushupLogTests: XCTestCase {
         XCTAssertNil(PushupDay.date(forKey: "not-a-day", calendar: calendar))
     }
 
+    // MARK: - Logical day (04:00 rollover)
+
+    func testSmallHoursCountTowardThePreviousEvening() {
+        // The reported bug: a set done just after midnight showed up as "today" the next afternoon.
+        var clock = date("2026-11-02T00:30:00-05:00")   // Monday 00:30, still Sunday night's session
+        let store = PushupLogStore(defaults: defaults, calendar: calendar, now: { clock })
+        for _ in 0..<10 { store.increment() }
+        XCTAssertEqual(store.counts, ["2026-11-01": 10])
+
+        clock = date("2026-11-02T16:30:00-05:00")       // Monday afternoon
+        XCTAssertEqual(store.todayKey, "2026-11-02")
+        XCTAssertEqual(store.count(), 0, "yesterday's set must not read as today")
+        XCTAssertEqual(store.summary(), PushupSummary(today: 0, thisWeek: 10, total: 10, currentStreak: 1))
+        store.increment()
+        XCTAssertEqual(store.counts, ["2026-11-01": 10, "2026-11-02": 1])
+    }
+
+    func testRolloverHappensAtFourAM() {
+        XCTAssertEqual(PushupDay.key(for: PushupDay.today(at: date("2026-11-02T03:59:00-05:00"), calendar: calendar),
+                                     calendar: calendar), "2026-11-01")
+        XCTAssertEqual(PushupDay.key(for: PushupDay.today(at: date("2026-11-02T04:01:00-05:00"), calendar: calendar),
+                                     calendar: calendar), "2026-11-02")
+        let grid = PushupGrid.build(weeks: 4, endingAt: date("2026-11-02T02:00:00-05:00"), calendar: calendar)
+        XCTAssertEqual(grid.todayKey, "2026-11-01")
+    }
+
+    func testPastDaysCanBeCorrectedButFutureDaysCannot() {
+        let monday = date("2026-11-02T16:30:00-05:00")
+        let store = PushupLogStore(defaults: defaults, calendar: calendar, now: { monday })
+        for _ in 0..<3 { store.increment() }
+        // Move the three taps back to Sunday, where they belonged.
+        let sunday = PushupDay.date(forKey: "2026-11-01", calendar: calendar)!
+        for _ in 0..<3 { store.decrement(); store.increment(on: sunday) }
+        XCTAssertEqual(store.counts, ["2026-11-01": 3])
+        XCTAssertEqual(store.count(on: sunday), 3)
+
+        let tomorrow = PushupDay.date(forKey: "2026-11-03", calendar: calendar)!
+        XCTAssertEqual(store.increment(on: tomorrow), 0)
+        XCTAssertEqual(store.counts, ["2026-11-01": 3], "a day after today can't be logged")
+    }
+
     // MARK: - Store
 
     func testIncrementAndUndoNeverGoBelowZero() {

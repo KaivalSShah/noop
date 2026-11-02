@@ -6,9 +6,10 @@ import Combine
 // The user taps once per push-up; each tap adds 1 to TODAY's total. Only the per-day totals are kept,
 // as one JSON dictionary `[yyyy-MM-dd: count]` under a single UserDefaults key — the same small-user-data
 // posture `CaffeineLogStore` uses (one process-wide `ObservableObject`, JSON in UserDefaults, on-device
-// only, never synced). Days are bucketed by the CALENDAR day in the user's local time zone (midnight
-// rollover, not the 04:00 logical day Today uses), because "how many did I do on the 3rd" is a calendar
-// question.
+// only, never synced). "Today" is the app-wide LOGICAL day (`Repository.logicalDayRolloverHour`, 04:00
+// local), not the calendar day: a set done at 00:30 belongs to the evening before, the day the user is
+// still living in. Keys are the calendar date of that logical day in the local time zone. Past days can
+// be edited explicitly (the history graph's selected square); future days never can.
 //
 // Everything below the store is pure (calendar + dictionary in, values out) so the bucketing, the summary
 // figures and the contribution-graph layout are unit-testable without UI or persistence.
@@ -49,6 +50,15 @@ enum PushupDay {
     static func noon(of date: Date, calendar: Calendar) -> Date {
         calendar.date(bySettingHour: 12, minute: 0, second: 0, of: date) ?? date
     }
+
+    /// The hour the push-up day rolls over: the same 04:00 boundary Today uses.
+    static let rolloverHour = Repository.logicalDayRolloverHour
+
+    /// Noon on the logical day `now` belongs to — the calendar day of `now - rolloverHour` hours, so the
+    /// small hours after midnight still count toward the previous evening.
+    static func today(at now: Date, calendar: Calendar, rolloverHour: Int = rolloverHour) -> Date {
+        noon(of: now.addingTimeInterval(-Double(rolloverHour) * 3_600), calendar: calendar)
+    }
 }
 
 /// The headline figures shown above the history graph.
@@ -61,7 +71,7 @@ struct PushupSummary: Equatable {
     var currentStreak: Int
 
     static func compute(counts: [String: Int], now: Date, calendar: Calendar) -> PushupSummary {
-        let today = PushupDay.noon(of: now, calendar: calendar)
+        let today = PushupDay.today(at: now, calendar: calendar)
         func count(_ date: Date) -> Int { max(0, counts[PushupDay.key(for: date, calendar: calendar)] ?? 0) }
         func day(_ offset: Int) -> Date? { calendar.date(byAdding: .day, value: offset, to: today) }
 
@@ -125,7 +135,7 @@ struct PushupGrid: Equatable {
     let todayKey: String
 
     static func build(weeks weekCount: Int, endingAt now: Date, calendar: Calendar) -> PushupGrid {
-        let today = PushupDay.noon(of: now, calendar: calendar)
+        let today = PushupDay.today(at: now, calendar: calendar)
         let todayKey = PushupDay.key(for: today, calendar: calendar)
         let columns = max(1, weekCount)
         let weekdayIndex = (calendar.component(.weekday, from: today) - calendar.firstWeekday + 7) % 7
@@ -214,25 +224,40 @@ final class PushupLogStore: ObservableObject {
         self.counts = decoded.filter { $0.value > 0 }
     }
 
-    /// The total for the calendar day containing `date` (defaults to now).
-    func count(on date: Date? = nil) -> Int {
-        counts[PushupDay.key(for: date ?? now(), calendar: calendar)] ?? 0
+    /// The key of the logical day the user is in right now.
+    var todayKey: String {
+        PushupDay.key(for: PushupDay.today(at: now(), calendar: calendar), calendar: calendar)
     }
 
-    /// Add one push-up to the day containing `date` (defaults to now). Returns that day's new total.
+    /// The key a mutation applies to: the calendar day of `date` when given (a past day being edited),
+    /// otherwise today's logical day. Nil for a day after today, which can't be logged.
+    private func editableKey(_ date: Date?) -> String? {
+        let key = date.map { PushupDay.key(for: $0, calendar: calendar) } ?? todayKey
+        return key <= todayKey ? key : nil
+    }
+
+    /// The total for the calendar day of `date`, or today's logical day when nil.
+    func count(on date: Date? = nil) -> Int {
+        let key = date.map { PushupDay.key(for: $0, calendar: calendar) } ?? todayKey
+        return counts[key] ?? 0
+    }
+
+    /// Add one push-up to the calendar day of `date`, or today's logical day when nil. Days after today
+    /// are refused. Returns that day's new total.
     @discardableResult
     func increment(on date: Date? = nil) -> Int {
-        let key = PushupDay.key(for: date ?? now(), calendar: calendar)
+        guard let key = editableKey(date) else { return 0 }
         let next = (counts[key] ?? 0) + 1
         counts[key] = next
         return next
     }
 
-    /// Remove one push-up from the day containing `date` (defaults to now) — the undo for a mistaken tap.
-    /// Never goes below zero; a day that reaches zero is dropped from the log. Returns the new total.
+    /// Remove one push-up from the calendar day of `date`, or today's logical day when nil — the undo for
+    /// a mistaken tap. Never goes below zero; a day that reaches zero is dropped from the log. Returns the
+    /// new total.
     @discardableResult
     func decrement(on date: Date? = nil) -> Int {
-        let key = PushupDay.key(for: date ?? now(), calendar: calendar)
+        guard let key = editableKey(date) else { return 0 }
         let current = counts[key] ?? 0
         guard current > 0 else { return 0 }
         let next = current - 1
